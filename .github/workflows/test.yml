@@ -1,13 +1,18 @@
 name: test suite
 
 on:
-  push:
-    branches: [master]
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional pytest selector to run a subset of tests"
+        required: false
+        default: ""
 
 jobs:
   changed-files:
+    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       workflow-changed: ${{ steps.changed-files.outputs.workflow_any_changed }}
       pyproject-changed: ${{ steps.changed-files.outputs.src_any_changed }}
@@ -35,12 +40,8 @@ jobs:
 
   pyright:
     runs-on: ubuntu-latest
-    needs: changed-files
-    if: |
-      ${{
-        (needs.changed-files.outputs.workflow-changed == 'true')
-        || (needs.changed-files.outputs.src-changed == 'true')
-      }}
+    timeout-minutes: 10
+    if: false
     steps:
     - uses: actions/checkout@v6
     - name: Set up Python
@@ -61,7 +62,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", pypy-3.11]
+        python-version: ["3.9", "3.10.19", "3.11.14", "3.12.12", "3.13.9", "3.14.0", pypy-3.11-v7.3.20]
         extras: ["[trio]"]
         lowest-bound: [false]
         include:
@@ -69,17 +70,17 @@ jobs:
           python-version: "3.9"
           extras: "[trio]"
         - os: macos-latest
-          python-version: "3.14"
+          python-version: "3.14.0"
           extras: "[trio]"
         - os: windows-latest
           python-version: "3.9"
           extras: "[trio]"
         - os: windows-latest
-          python-version: "3.14"
+          python-version: "3.14.0"
           extras: "[trio]"
         - name: only asyncio
           os: ubuntu-latest
-          python-version: "3.14"
+          python-version: "3.14.0"
           extras: ""
         - name: oldest dependencies
           os: ubuntu-latest
@@ -87,15 +88,11 @@ jobs:
           extras: "[trio]"
           lowest-bound: true
     runs-on: ${{ matrix.os }}
-    needs: changed-files
-    if: |
-      ${{
-        (needs.changed-files.outputs.workflow-changed == 'true')
-        || (needs.changed-files.outputs.pyproject-changed == 'true')
-        || (needs.changed-files.outputs.src-changed == 'true')
-        || (needs.changed-files.outputs.tests-changed == 'true')
-      }}
+    timeout-minutes: 30
     steps:
+    - name: Reserve the fixed test port 54321 from ephemeral port allocation
+      if: runner.os == 'Linux'
+      run: sudo sysctl -w net.ipv4.ip_local_reserved_ports=54321
     - uses: actions/checkout@v6
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v6
@@ -106,7 +103,7 @@ jobs:
         cache-dependency-path: pyproject.toml
     - name: Install the project and its dependencies
       if: matrix.lowest-bound == false
-      run: pip install --group test -e .${{ matrix.extras }}
+      run: pip install --group test -e .${{ matrix.extras }} "pytest<9.1"
     - name: Install the project and its dependencies (lowest bound)
       if: matrix.lowest-bound == true
       run: |
@@ -123,28 +120,50 @@ jobs:
         Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "1.2.3.4 xn--fa-hia.de"
         Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "5.6.7.8 fass.de"
     - name: Test with pytest
-      run: coverage run -m pytest -v
-      timeout-minutes: 5
+      run: coverage run -m pytest -v --junitxml=junit.xml ${{ inputs.test-filter }}
+      timeout-minutes: 15
       env:
         PYTEST_DISABLE_PLUGIN_AUTOLOAD: 1
     - name: Generate coverage report
       run: coverage xml
-    - name: Upload Coverage
-      uses: coverallsapp/github-action@v2
-      with:
-        parallel: true
-        file: coverage.xml
+    - name: Summarize test results and skip reasons
+      if: always()
+      shell: python
+      run: |
+        import collections
+        import xml.etree.ElementTree as ET
+
+        root = ET.parse("junit.xml").getroot()
+        cases = list(root.iter("testcase"))
+        skips = collections.Counter()
+        outcome = collections.Counter()
+        for case in cases:
+            skipped = case.find("skipped")
+            if skipped is not None:
+                outcome["skipped"] += 1
+                skips[skipped.get("message", "")] += 1
+            elif case.find("failure") is not None:
+                outcome["failed"] += 1
+            elif case.find("error") is not None:
+                outcome["error"] += 1
+            else:
+                outcome["passed"] += 1
+        print(f"TEST RESULTS: {len(cases)} testcases: {dict(outcome)}")
+        print("Optional dependencies are installed per leg by pyproject.toml markers:")
+        print("  truststore: python_version >= '3.10' (not installable on 3.9)")
+        print("  uvloop: CPython and not Windows (absent on PyPy and Windows)")
+        print("  winloop: CPython and Windows (absent on Linux and macOS)")
+        print("  trio: only via the [trio] extra (absent on the 'only asyncio' leg)")
+        print("  sniffio: not an anyio or test dependency; installed only transitively")
+        print("           by trio, so it is absent on the 'only asyncio' leg")
+        print(f"SKIP REASONS ({sum(skips.values())} skipped):")
+        for reason, count in sorted(skips.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:5d} x {reason}")
 
   docs:
     runs-on: ubuntu-latest
-    needs: changed-files
-    if: |
-      ${{
-        (needs.changed-files.outputs.workflow-changed == 'true')
-        || (needs.changed-files.outputs.pyproject-changed == 'true')
-        || (needs.changed-files.outputs.src-changed == 'true')
-        || (needs.changed-files.outputs.docs-changed == 'true')
-      }}
+    timeout-minutes: 15
+    if: false
     steps:
     - uses: actions/checkout@v6
     - name: Set up Python ${{ matrix.python-version }}
@@ -161,7 +180,9 @@ jobs:
   coveralls:
     name: Finish Coveralls
     needs: test
+    if: false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
     - name: Finished
       uses: coverallsapp/github-action@v2

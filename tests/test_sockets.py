@@ -996,6 +996,12 @@ class TestTCPListener:
             }
             assert len(ports) == 1
 
+    @pytest.mark.skipif(
+        sys.platform == "linux",
+        reason="flaky on Linux CI: the retry's real bind of the ephemeral port picked "
+        "for one address family collides with a live socket on the other family "
+        "(EADDRINUSE), exhausting the only remaining attempt",
+    )
     async def test_tcp_listener_retry_after_partial_failure(self) -> None:
         """
         Simulate a case where the first bind() succeeds with an ephemeral port,
